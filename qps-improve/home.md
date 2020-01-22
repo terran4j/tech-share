@@ -316,6 +316,78 @@ QPS 只有 1400 左右。
 ```
 
 改后再进行压测，结果如下：
+
 ![ptest-log-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-log-2.png "优化日志后的压测结果")
 
-结论： 优化日志配置后，QPS提升 到 2300 ，虽不如完全关闭日志后的 2400 ，但也相差不多了。
+优化日志配置后，QPS提升 到 2300 ，虽不如完全关闭日志后的 2400 ，但也相差不多了。
+
+
+### 第 3 轮： 分析系统性能瓶颈
+
+QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最佳状态`，
+这一轮我们尝试分析下压测状态下的机器性能，如 CPU 内存 网络IO 等指标，看能不能找出性能瓶颈。
+<br>
+
+我们先查看 java 进程的性能：
+1. 用 `java -ef | grep java` 查看 java 程序的进程id (这步开发者应该都会吧，这里省略截图)
+2. 用 `pidstat -p [进程id] [打印的间隔时间] [打印次数]` 命令来打印出 java 进程的 CPU 使用情况：
+![ptest-cpu-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-1.png "进程CPU使用情况")
+笔者发现，一旦压测开始， CPU 直接涨到 100% 
+3. 
+
+
+然后用 top -Hp pid 找到 CPU 最高的线程：
+
+
+
+
+
+
+
+然后对此线程，打印堆栈信息（多打印几次）：
+
+
+
+
+通过以上信息，发现性能瓶颈还是卡在日志输出上（
+
+<appender name="ASYNC_DAILY_ROLLING_FILE" class="ch.qos.logback.classic.AsyncAppender">
+），具体来说，有两个问题：
+
+ logback 用了  ArrayBlockingQueue 缓存日志对象，似乎在 take 端 和 poll 端存在等待。
+仍有获取 caller 数据的情况（还记得第 4 轮的结论么？）
+第 1 个问题，网上查了下，logback  的低版本创建 ArrayBlockingQueue  时，用的是公平锁，的确会有性能问题（它在高版本解决了，用非公平锁），这里升级 logback jar 的改动较大，因此直接 hack 改它的源码，如下：
+
+
+
+SpringBoot 的类加载机制，是优先加载我们项目中的代码，因此替换掉了 logback 的这个类。
+
+第 2 个问题，找到了问题所在，原来日志配置中有提取 method 信息，还是会触发读取调用者信息（还记得第 4 轮的结论么？ 这个操作成本很高）
+
+
+
+<appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+ <File>${LOG_HOME}/lighthouse-cms-dynamic.log</File>
+ <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+ <!--日志文件输出的文件名-->
+ <FileNamePattern>${LOG_HOME}/lighthouse-cms-dynamic.%d{yyyy-MM-dd}.log.gz</FileNamePattern>
+ <!--日志文件保留天数-->
+ <MaxHistory>60</MaxHistory>
+ </rollingPolicy>
+ <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+ <!-- 优化项1：去掉写日志时立即刷磁盘的操作，以提升日志写入的性能。 -->
+ <ImmediateFlush>false</ImmediateFlush>
+ <!--格式化输出：%d表示日期，%thread表示线程名，%-5level：级别从左显示5个字符宽度%msg：日志消息，%n是换行符-->
+ <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS}-|%thread-|%level-|%X{requestId}-|%X{req.remoteHost}-|%X{req.xForwardedFor}-|%X{req.requestURI}-|%X{req.queryString}-|%X{req.userAgent}-|%logger{50}:%method-|%msg%n</pattern>
+ </encoder>
+</appender>
+所以把 :method 去掉。
+
+
+改了这两个地方后，部署到 88 机器上，再压测，QPS 提升到 2500。
+
+
+
+结论：
+
+还是日志的影响较大，以后日志的输入要小心啊。
