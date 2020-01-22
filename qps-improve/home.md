@@ -21,9 +21,14 @@
 当然这只是一个简图，真实的业务逻辑还是要比这个复杂一些，但主要的流程还是图上反映的那样：
 从缓存中读数据，读到后返回给端（没读到就抛无数据异常）。
 
+Web 服务器是 CentOS 系统， CPU 是 4 核，JVM堆内存大小为 4 G。
+程序是基于 SpringBoot 1.5.2 构建的，内嵌的 Tomcat 。
+
 <br>
 
 按理说这个接口的 QPS 应该很高才对，但实际测下来只有 1400，所以笔者的任务就是排查性能瓶颈并解决，以提升 QPS 指标。
+
+
 
 
 ### 安装接口压测工具 wrk
@@ -32,7 +37,7 @@
 要进行性能优化，对接口进行压测是经常要做的事，所以我们希望有一款简单好用的压测工具，最终我们选择了 wrk 。
 我们找了一台 CentOS 的机器作为压测机安装 wrk ，安装方法如下：
 
-```
+```shell
 sudo yum groupinstall 'Development Tools'
 sudo yum install openssl-devel
 sudo yum install git
@@ -43,17 +48,28 @@ make
 
 安装好后，我们对一台 web 服务器直接发起 HTTP 请求进行压测：
 ```
-./wrk/wrk -t300 -c400 -d30s --latency "http://10.41.135.74:8982/api/v3/dynamic/product/column/detail?productId=204918601"
+./wrk/wrk -t300 -c400 -d30s "http://10.41.135.74:8982/api/v3/dynamic/product/column/detail?productId=204918601"
 ```
 执行的结果如下：
+
 ![try-wrk](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/try-wrk.png "wrk试用")
 
+参数说明：
+* -t300 指起 300 个线程来执行请求，每个线程在执行完一个HTTP请求后会立即执行下一个HTTP请求。
+* -c400 指建立400个连接，用于 HTTP 请求，而不是每次请求都重新建立连接。
+* -d30s 指本轮压测持续时间为 30 秒。
+
+结果说明：
+* Requests/sec 指每秒处理的请求数量，也就是我们说的 QPS （Query Per Second）
 
 
-一、添加 perf4j （用于记录程序各阶段耗时统计，找出性能瓶颈）
-为了能了解高并发情况下，程序各阶段的耗时，我们先引入 perf4j 开源项目。
+### 引入 Perf4j 
 
-引用 perf4j 依赖
+perf4j 是一款用于诊断 Java 应用程序性能的开源工具，它可以统计各阶段耗时统计，帮助我们找出性能瓶颈。
+为了知晓在高并发情况下，程序各阶段的耗时，我们先引入 perf4j 开源项目，步骤如下：
+
+
+1. 在项目 pom.xml 中添加 perf4j 依赖:
 
 ```xml
 <dependency>
@@ -62,82 +78,96 @@ make
 </dependency>
 ```
 
+
 2. 在 Application 类（或其它 Configuration 类中添加 TimingAspect 的 Bean 定义）
 
+```java
 @Bean
 public TimingAspect timingAspect() {
  return new TimingAspect();
 }
-注意： 我们的系统的日志库用的是 slf4j，因此要引的是 org.perf4j.slf4j.aop 包里面的 TimingAspect 类，不要引错了！
+```
+
+注意： 我们的系统的日志库用的是 slf4j，因此要引的是 org.perf4j.slf4j.aop 包里面的 TimingAspect 类，不要引错了哦。
 
 
-
-3. 对想要监测的代码，在方法上添加  @Profiled 注解：
-
+3. 对想要监测的代码，在方法上添加  @Profiled 注解，如：
+```java
 @Profiled
 @RequestMapping(name = "请求 Card 化页面数据", value = "/cpage", method = RequestMethod.GET)
 public String getCpageResult(
         @RequestParam(value = "cpageCode", required = false) String cpageCode,
- @RequestParam(value = "previewMode", required = false) String previewModeQuery) {
-
-
+        @RequestParam(value = "previewMode", required = false) String previewModeQuery) {
+  // ...
 }
+```
 
 或用 org.perf4j.StopWatch 类：
 
+```java
 public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
     org.perf4j.StopWatch stopWatch = new Slf4JStopWatch("queryColumnDetailV2FromCache");
- stopWatch.start("4-1-genColumnDetailV2CacheKey");
- String cacheKey = genColumnDetailV2CacheKey(qipuId);
- stopWatch.stop();
- stopWatch.start("4-2-getCmsInfoFromCB");
- String result = cmsCouchbaseOp.getCmsInfoFromCB(cacheKey);
- stopWatch.stop();
- if (StringUtils.isBlank(result)) {
-        LOGGER.warn("queryColumnDetailV2FromCache: " + cacheKey + " not exist, result:" + result);
- return null;
- } else {
+    stopWatch.start("4-1-genColumnDetailV2CacheKey");
+    String cacheKey = genColumnDetailV2CacheKey(qipuId);
+    stopWatch.stop();
+    stopWatch.start("4-2-getCmsInfoFromCB");
+    String result = cmsCouchbaseOp.getCmsInfoFromCB(cacheKey);
+    stopWatch.stop();
+    if (StringUtils.isBlank(result)) {
+        LOGGER.warn("queryColumnDetailV2FromCache: {} not exist, result: {}", cacheKey, result);
+        return null;
+    } else {
         stopWatch.start("4-3-parseColumnDetailV2");
- ColumnDetailV2 columnDetailV2 = JSON.parseObject(result, ColumnDetailV2.class);
- stopWatch.stop();
- return columnDetailV2;
- }
+        ColumnDetailV2 columnDetailV2 = JSON.parseObject(result, ColumnDetailV2.class);
+        stopWatch.stop();
+        return columnDetailV2;
+    }
 }
+```
 
+注意 SpringBoot 框架自身也提供了一个 StopWatch 类（在包 `org.springframework.util` 中），
+它没有 `org.perf4j` 提供的 StopWatch 类的功能强大。
 
-4. logback 日志文件中定义 Perf4j 的 Appender，推荐 Perf4j 的日志单独输出到一个文件：
+4. 在 logback 日志文件中定义 Perf4j 的 Appender（推荐 Perf4j 的日志单独输出到一个文件），如：
+
+```xml
+<property name="LOG_HOME" value="/data/logs/kpp-lighthouse" />
+
 <appender name="Perf4jFileAppender" class="ch.qos.logback.core.rolling.RollingFileAppender">
- <File>${LOG_HOME}/lighthouse-cms-web-perf4.log</File>
- <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
- <!--文件的路径与名称,{yyyy-MM-dd.HH}精确到小时,则按小时分割保存-->
- <FileNamePattern>${LOG_HOME}/lighthouse-cms-web-perf4.%d{yyyy-MM-dd.HH}.log.gz</FileNamePattern>
- <!-- 如果当前是按小时保存，则保存48小时(=2天)内的日志（建议生产环境改成7天） -->
- <MaxHistory>48</MaxHistory>
- </rollingPolicy>
- <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
- <pattern>%m%n</pattern>
- </encoder>
+   <File>${LOG_HOME}/lighthouse-cms-web-perf4.log</File>
+   <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <!--文件的路径与名称,{yyyy-MM-dd.HH}精确到小时,则按小时分割保存-->
+      <FileNamePattern>${LOG_HOME}/lighthouse-cms-web-perf4.%d{yyyy-MM-dd.HH}.log.gz</FileNamePattern>
+      <!-- 如果当前是按小时保存，则保存48小时(=2天)内的日志（建议生产环境改成7天） -->
+      <MaxHistory>48</MaxHistory>
+   </rollingPolicy>
+   <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+      <pattern>%m%n</pattern>
+   </encoder>
 </appender>
 
-<appender name="Perf4jAppender"
- class="org.perf4j.logback.AsyncCoalescingStatisticsAppender">
- <!-- TimeSlice 用来设置聚集分组输出的时间间隔，默认是 30000 ms，
- 在生产环境中可以适当增大以供减少写文件的次数 -->
- <param name="TimeSlice" value="10000"/>
- <appender-ref ref="Perf4jFileAppender"/>
+<appender name="Perf4jAppender" class="org.perf4j.logback.AsyncCoalescingStatisticsAppender">
+    <!-- 
+       TimeSlice 用来设置聚集分组输出的时间间隔，默认是 30000 ms，
+       在生产环境中可以适当增大以供减少写文件的次数 
+    -->
+    <param name="TimeSlice" value="10000"/>
+    <appender-ref ref="Perf4jFileAppender"/>
 </appender>
 
 <!-- Perf4j 默认用名称为 org.perf4j.TimingLogger 的 Logger -->
-<logger name="org.perf4j.TimingLogger" additivity="false">
- <level value="INFO"/>
- <appender-ref ref="Perf4jAppender"/>
+<logger name="org.perf4j.TimingLogger" level="INFO" additivity="false">
+  <appender-ref ref="Perf4jAppender"/>
 </logger>
+```
 
 
+引入完了后，笔者用 `org.perf4j.StopWatch` 的方式在程序代码中添加性能监测代码。
+然后在本地运行程序，找指定的日志文件中查看性能统计数据，如下：
+
+![per4j-log](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/per4j-log.png "per4j-log")
 
 
-二、 用 Perf4j 的 API 添加性能监测代码
-本地运行程序，找指定的日志文件中查看性能统计数据：
 
 
 
