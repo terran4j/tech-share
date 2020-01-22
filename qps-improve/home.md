@@ -1,36 +1,34 @@
 
-# 在 Java 应用中提升 QPS 实战
+# 提升 Java 应用 QPS 实战
 
 ### 导读
+
 作为一名开发人员，你负责的系统可能会出现更高的并发访问量的挑战，
-当然这是好事，因为这既反映出您的业务在蒸蒸日上，对你而言也是一个锤炼技术能力的技术。
+当然这是好事，因为这既反映出您的业务在蒸蒸日上，对你而言也是一个锤炼技术能力的机会。
 <br>
-本文的主题是记录实战过程中的一次 Java Web 应用性能优化过程，包括：
-如何去排查性能问题，如何利用工具，以及如何去解决；
-为大家提供一个优化的思路，以供大家参考。
+本文的主题是记录笔者在工作过程中的一次 Java Web 应用性能优化过程，包括：如何去排查性能问题，如何利用工具，以及如何去解决等，以供大家参考。
 
 
 ### 问题背景
+
 本次性能优化的起源，是一次线上事故引起的，当时一个系统的访问量突然暴增，系统不堪重负而导致接口响应变慢，
-最终App客户端出现大量 socket timeout 异常。
+最终 App 端的接口调用出现大量 socket timeout 异常。
 <br>
 事后笔者对这个系统进行梳理和排查，发现这个系统的业务逻辑其实并不复杂：
 
 ![arch-old](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/arch-old.jpg "系统架构简图")
 
-当然这只是一个简图，真实的业务逻辑还是要比这个复杂一些，但主要的流程还是图上反映的那样：
-从缓存中读数据，读到后返回给端（没读到就抛无数据异常）。
+当然这只是一个简图，真实的业务逻辑还是要比这个复杂一点，但主要的流程还是图上反映的那样，即：从缓存中读数据，读到后返回给端上（没读到就抛无数据异常了）。
 <br>
-Web 服务器是 CentOS 系统， CPU 是 4 核，JVM堆内存大小为 4 G。
-程序是基于 SpringBoot 1.5.2 构建的，内嵌的 Tomcat 。
+
+Web 服务器是 CentOS 系统， CPU 是 4 核的，JVM 堆内存大小为 4 G。
+程序是基于 SpringBoot 1.5.2 构建的，内嵌的 Web 容器 Tomcat 。
 <br>
-分布式缓存用的是 CoachBase（简称 cb），对 CoachBase 不了解的读者可以参考
+分布式缓存用的是 CoachBase（后续简称 cb），对 CoachBase 不了解的读者可以参考
 [这里](https://xiaoxiami.gitbook.io/couchbase/chapter1)
 <br>
 
 按理说这个接口的 QPS 应该很高才对，但实际测下来只有 1400，所以笔者的任务就是排查性能瓶颈并解决，以提升 QPS 指标。
-
-
 
 
 ### 安装接口压测工具 wrk
@@ -39,7 +37,7 @@ Web 服务器是 CentOS 系统， CPU 是 4 核，JVM堆内存大小为 4 G。
 要进行性能优化，对接口进行压测是经常要做的事，所以我们希望有一款简单好用的压测工具，最终我们选择了 wrk 。
 我们找了一台 CentOS 的机器作为压测机安装 wrk ，安装方法如下：
 
-```shell
+```jshelllanguage
 sudo yum groupinstall 'Development Tools'
 sudo yum install openssl-devel
 sudo yum install git
@@ -331,16 +329,22 @@ QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最�
 我们先查看 java 进程的性能：
 1. 用 `java -ef | grep java` 查看 java 程序的`进程id`(这步开发者应该都会吧，这里就省略截图了)；
 2. 用 `pidstat -p [进程id] [打印的间隔时间] [打印次数]` 命令来打印出 java 进程的 CPU 使用情况：
+
 ![ptest-cpu-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-1.png "进程CPU使用情况")
+
 笔者发现，一旦压测开始， CPU 直接涨到 100% （上图红框所示）。
 （这里显示的 CPU 为每个核的平均值，而不是加和值，因此虽然是 4 核，100% 指 CPU 已打满了）。
 3. 为了知道是具体哪个线程占 CPU 高，用 `top -Hp [进程id]` 来查看线程的 CPU 占用情况：
+
 ![ptest-cpu-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-2.png "线程CPU使用情况")
+
 发现是 id 为 63099 的线程占 CPU 最高，为 46% 。
 4. 用 `printf "%x\n" [进程id]` 打印出此线程 id 的十六进制值： f67b 。
 5. 用 `jstack [进程id] |grep -B 1 -C 20 [线程id十六进制值]` 打印出此线程的堆栈信息（建议多打印几次），如下：
+
 ![ptest-cpu-3](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-3.png "线程堆栈1")
 ![ptest-cpu-4](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-4.png "线程堆栈2")
+
 <br>
 
 通过以上堆栈信息，发现是下面这个日志输出的 Appender 线程占用了大量的 CPU 资源：
@@ -356,6 +360,7 @@ QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最�
 对第 1 个问题，网上查了下，logback 的低版本在创建 ArrayBlockingQueue 时，用的是公平锁，的确会有性能问题
 （它在高版本解决了，用非公平锁），在我们项目中升级 logback jar 的改动较大，笔者简单起见直接 hack 改它的源码，将类 AsyncAppenderBase 的源码单独拷贝出来：
 ![ptest-cpu-5](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-5.png "修改AsyncAppenderBase源码")
+
 然后进行修改：
 ```java
 public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implements AppenderAttachable<E> {
@@ -439,16 +444,21 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 
 1. 排名第 1 位的线程，占 CPU 24% ，经排查它仍是日志线程；
 2. 排名第 2 ~ 5 位的线程，每个占 CPU 12%（4个加起来就是 48%），经排查它们都是 GC 线程（用于 YGC）：
+
 ![ptest-jvm-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "YGC线程信息")
+
 3. 排名第 6 位及以后线程，平均每个占比 7~8%，经排查大多都是 Web 容器的线程，阻塞在等待 CB 调用的返回上：
+
 ![ptest-jvm-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "Web容器线程信息")
-<br>
+
 
 虽然这三个都可能是问题，但我们每次都聚焦在一个问题是解决，我们选择先解决第 2 个问题，即 GC 线程的问题。
 <br>
 
 我们用 `jstat -gcutil [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令来查一下 GC 的情况：
+
 ![ptest-jvm-3](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-3.png "GC信息")
+
 每列解释如下：
 * S0：幸存1区当前使用比例
 * S1：幸存2区当前使用比例
@@ -464,7 +474,9 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 上图的红框部分，是压测开始时的 GC 信息，从图上 S0 区、S1 区在压测开始后就不停的捣腾，并且 YGC 这列数字增加得很快，说明 YGC 比较严重。<br>
 那 YGC 具体有多严重，以及 YGC 的具体情况是怎样的，
 我们用 `jstat -gcnewcapacity [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令输出 JVM 新生代的具体信息
+
 ![ptest-jvm-4](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-4.png "YGC信息")
+
 每列解释如下：
 * NGCMN：新生代最小容量
 * NGCMX：新生代最大容量
@@ -488,8 +500,140 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 <br>
 
 设置好 JVM 参数后，我们再压测：
+
 ![ptest-jvm-5](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-5.png "优化JVM后的压测结果")
+
 发现 QPS 提升到 2680（接近 2700）。
 同时GC 线程的 CPU 占用率降下来了，而YGC 的次数，也由 1 秒 6 次，变成了 2 秒 1 次。
+
 ![ptest-jvm-6](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-6.png "优化JVM后的YGC信息")
+
+
+### 第 5 轮： 将 Web 容器从 Tomcat 改为 Undertow
+
+经过上一轮优化后，发现不再有明显 CPU 高的线程(最高还是日志线程 14%)，
+但 Web 容器中的 Worker 线程平均为 7%，因此可以考虑下对 Web 容器进行优化。
+
+在网上查资料，有的文章分析说 Undertow 的性能比 Tomcat 好，
+因此我们将 SpringBoot 中默认的 Tomcat 改为 Undertow 试试看。
+
+首先，在 pom.xml 配置如下：
+```xml
+<!-- 网上说 Undertow 的性能比 Tomcat 好，试试看？ -->
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-web</artifactId>
+  <!-- 移除掉默认支持的 Tomcat -->
+  <exclusions>
+    <exclusion>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-tomcat</artifactId>
+    </exclusion>
+  </exclusions>
+</dependency>
+<!-- 添加 Undertow 容器 -->
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-undertow</artifactId>
+</dependency>
+```
+
+然后，在 application.yml 文件中配置 Undertow 的相关参数：
+```yaml
+server:
+    port: 8982
+    undertow:
+        io-threads: 4          # 设置IO线程数, 它主要执行非阻塞的任务,它们会负责多个连接, 默认设置每个CPU核心一个线程
+        worker-threads: 256    # 阻塞任务线程池, 当执行类似servlet请求阻塞操作, undertow会从这个线程池中取得线程,它的值设置取决于系统的负载
+                               # 这个值要根据阻塞系数来设置，并不是所谓的越大越好，太大反而会因竞争资源导致性能下降！！
+        # 以下的配置会影响buffer,这些buffer会用于服务器连接的IO操作,有点类似netty的池化内存管理
+        # 每块buffer的空间大小,越小的空间被利用越充分，不要设置太大，以免影响其他应用，合适即可
+        # 每个区分配的buffer数量 , 所以 pool 的大小是buffer-size * buffers-per-region
+        buffer-size: 1048
+        buffers-per-region: 1048
+        direct-buffers: true   #  是否分配的直接内存(NIO直接分配的堆外内存)，建议开启可以使用堆外内存减少byte数组的回收开销。
+        accesslog:
+            enabled: false
+```
+
+再压测:
+![ptest-undertow-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-undertow-1.png "优化Web容器后的压测结果")
+
+发现 QPS 提升到 3800，果然 Undertow 的性能比 Tomcat 好不少。
+
+
+### 第 6 轮： 添加加上内存缓存
+
+之前发现 Web 容器的 Worker 线程大多阻塞在调用 cb 上，考虑到当前场景下 cb 中的数据是静态（每 5 分钟变化一次），
+可以进行内存缓存，也就是如果从 cb 中读到了数据，就放在内存缓存中（当然要将内存缓存设置一个比较短的过期时间）。
 <br>
+
+经过比较，我们选择了 Guava 作为内存缓存的实现方案，代码如下：
+```java
+@Configuration
+@EnableCaching
+public class GuavaCacheConfig {
+ 
+    @Bean
+    public CacheManager cacheManager() {
+        GuavaCacheManager cacheManager = new GuavaCacheManager();
+        cacheManager.setCacheBuilder(
+                CacheBuilder.newBuilder().
+                        expireAfterWrite(10, TimeUnit.SECONDS).
+                        maximumSize(10000));
+        return cacheManager;
+    }
+}
+```
+
+经过计算，本场景下一条缓存平均大小为 10KB，1W 条就是 100M，而 JVM 堆内存有 4G，理论上是完全撑得住的。
+在 cb 中的数据，是每 5 分钟刷新一次，因此内存缓存设置为 10 秒过期，也完全没有问题。
+<br>
+
+
+然后在我们在读 cb 的地方加上内存缓存，代码如下：
+```java
+@Cacheable(value = "column-detail", key = "#qipuId")
+public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
+    LOGGER.info("queryColumnDetailV2FromCache, qipuId = {}", qipuId);
+    String cacheKey = genColumnDetailV2CacheKey(qipuId);
+    String result = cmsCouchbaseOp.getCmsInfoFromCB(cacheKey);
+    if (StringUtils.isBlank(result)) {
+        LOGGER.warn("queryColumnDetailV2FromCache: {} not exist, result: {}", cacheKey, result);
+        return null;
+    } else {
+        return JSON.parseObject(result, ColumnDetailV2.class);
+    }
+}
+```
+
+关键是第 1 行代码：`@Cacheable(value = "column-detail", key = "#qipuId")`
+即缓存块名为 column-detail，其中每条缓存的 key 为参数 qipuId 的值。
+
+考虑到加上内存缓存后，处理请求的 Worker 线程 Blocking 时间会大大减少，这里改小了 undertow 的线程数：
+```yaml
+server:
+    port: 8982
+    undertow:
+        ioThreads: 4
+        workerThreads: 32
+```
+io 线程数改为 4 （因为被测机器的 CPU 只有 4 核）， worker 线程数改为 32 （即 io 线程数的 8 倍）。
+注意：并不是线程数越多越小，因为太多线程数，资源竞争加剧反而对性能有损耗。
+
+
+将修改的代码部署到压测环境，再压测：
+![ptest-cache-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cache-1.png "添加内存缓存后的压测结果")
+
+QPS 进一步提升到 5000，说明在“恰当”的场景下，在分布式缓存的基础上加上内存缓存，能更进一步提升性能。
+
+
+### 总结与展望
+
+由于 5000 的 QPS 对当前业务场景已经足够用了，因此笔者也不打算花时间继续优化了。
+最后总结下做性能优化的一些思路和原则：
+* 数据驱动：通过“压测 + 观察各种数据”的方式，来分析程序的性能瓶颈，不要在猜想下尝试（即使猜想，也要先想办法验证你的猜想再动手优化）；
+* 聚焦最大瓶颈：如果有多个优化方向，则先评估哪一个方向的问题是最大瓶颈，然后集中精力只优化这个最大瓶颈，优化完后再评估下一个最大瓶颈并解决，如此反复；
+* 
+
+那实际上还有没有优化空间呢？笔者判断应该还是有不少优化空间的，感兴趣的读者可以自己尝试下哦。
