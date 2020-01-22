@@ -329,65 +329,167 @@ QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最�
 <br>
 
 我们先查看 java 进程的性能：
-1. 用 `java -ef | grep java` 查看 java 程序的进程id (这步开发者应该都会吧，这里省略截图)
+1. 用 `java -ef | grep java` 查看 java 程序的`进程id`(这步开发者应该都会吧，这里就省略截图了)；
 2. 用 `pidstat -p [进程id] [打印的间隔时间] [打印次数]` 命令来打印出 java 进程的 CPU 使用情况：
 ![ptest-cpu-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-1.png "进程CPU使用情况")
-笔者发现，一旦压测开始， CPU 直接涨到 100% 
-3. 
+笔者发现，一旦压测开始， CPU 直接涨到 100% （上图红框所示）。
+（这里显示的 CPU 为每个核的平均值，而不是加和值，因此虽然是 4 核，100% 指 CPU 已打满了）。
+3. 为了知道是具体哪个线程占 CPU 高，用 `top -Hp [进程id]` 来查看线程的 CPU 占用情况：
+![ptest-cpu-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-2.png "线程CPU使用情况")
+发现是 id 为 63099 的线程占 CPU 最高，为 46% 。
+4. 用 `printf "%x\n" [进程id]` 打印出此线程 id 的十六进制值： f67b 。
+5. 用 `jstack [进程id] |grep -B 1 -C 20 [线程id十六进制值]` 打印出此线程的堆栈信息（建议多打印几次），如下：
+![ptest-cpu-3](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-3.png "线程堆栈1")
+![ptest-cpu-4](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-4.png "线程堆栈2")
+<br>
 
-
-然后用 top -Hp pid 找到 CPU 最高的线程：
-
-
-
-
-
-
-
-然后对此线程，打印堆栈信息（多打印几次）：
-
-
-
-
-通过以上信息，发现性能瓶颈还是卡在日志输出上（
-
+通过以上堆栈信息，发现是下面这个日志输出的 Appender 线程占用了大量的 CPU 资源：
+```
 <appender name="ASYNC_DAILY_ROLLING_FILE" class="ch.qos.logback.classic.AsyncAppender">
-），具体来说，有两个问题：
+```
 
- logback 用了  ArrayBlockingQueue 缓存日志对象，似乎在 take 端 和 poll 端存在等待。
-仍有获取 caller 数据的情况（还记得第 4 轮的结论么？）
-第 1 个问题，网上查了下，logback  的低版本创建 ArrayBlockingQueue  时，用的是公平锁，的确会有性能问题（它在高版本解决了，用非公平锁），这里升级 logback jar 的改动较大，因此直接 hack 改它的源码，如下：
+具体来说，有两个问题：
+1. logback 用 ArrayBlockingQueue 缓存日志对象，似乎在 take 端 和 poll 端存在资源竞争（ArrayBlockingQueue 存取元素用的是一把锁）。
+2. 仍有获取 caller 数据的情况（还记得第 2 轮的优化项 3 么？）
+<br>
 
+对第 1 个问题，网上查了下，logback 的低版本在创建 ArrayBlockingQueue 时，用的是公平锁，的确会有性能问题
+（它在高版本解决了，用非公平锁），在我们项目中升级 logback jar 的改动较大，笔者简单起见直接 hack 改它的源码，将类 AsyncAppenderBase 的源码单独拷贝出来：
+![ptest-cpu-5](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-5.png "修改AsyncAppenderBase源码")
+然后进行修改：
+```java
+public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implements AppenderAttachable<E> {
+    
+    // 省略其它代码...
 
+    public void start() {
+        if (!this.isStarted()) {
+            if (this.appenderCount == 0) {
+                this.addError("No attached appenders found.");
+            } else if (this.queueSize < 1) {
+                this.addError("Invalid queue size [" + this.queueSize + "]");
+            } else {
+                this.blockingQueue = new ArrayBlockingQueue(this.queueSize, false);
+                if (this.discardingThreshold == -1) {
+                    this.discardingThreshold = this.queueSize / 5;
+                }
 
-SpringBoot 的类加载机制，是优先加载我们项目中的代码，因此替换掉了 logback 的这个类。
+                this.addInfo("Setting discardingThreshold to " + this.discardingThreshold);
+                this.worker.setDaemon(true);
+                this.worker.setName("AsyncAppender-Worker-" + this.getName());
+                super.start();
+                this.worker.start();
+            }
+        }
+    }
+    
+    // 省略其它代码...
+```
+其实只改了一行源代码，就是将：
+`this.blockingQueue = new ArrayBlockingQueue(this.queueSize);`
+改成：
+`this.blockingQueue = new ArrayBlockingQueue(this.queueSize, false);`
+（SpringBoot 的类加载机制，是优先加载我们项目中的代码，因此这样就替换掉了在 logback JAR包中的同名类）。
+<br>
 
-第 2 个问题，找到了问题所在，原来日志配置中有提取 method 信息，还是会触发读取调用者信息（还记得第 4 轮的结论么？ 这个操作成本很高）
-
-
-
+对第 2 个问题，终于在 logback.xml 中找到了问题所在，原来日志配置中有提取 method 信息（<pattern>元素中有 %method），还是会触发读取调用者信息：
+```xml
 <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
- <File>${LOG_HOME}/lighthouse-cms-dynamic.log</File>
- <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
- <!--日志文件输出的文件名-->
- <FileNamePattern>${LOG_HOME}/lighthouse-cms-dynamic.%d{yyyy-MM-dd}.log.gz</FileNamePattern>
- <!--日志文件保留天数-->
- <MaxHistory>60</MaxHistory>
- </rollingPolicy>
- <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
- <!-- 优化项1：去掉写日志时立即刷磁盘的操作，以提升日志写入的性能。 -->
- <ImmediateFlush>false</ImmediateFlush>
- <!--格式化输出：%d表示日期，%thread表示线程名，%-5level：级别从左显示5个字符宽度%msg：日志消息，%n是换行符-->
- <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS}-|%thread-|%level-|%X{requestId}-|%X{req.remoteHost}-|%X{req.xForwardedFor}-|%X{req.requestURI}-|%X{req.queryString}-|%X{req.userAgent}-|%logger{50}:%method-|%msg%n</pattern>
- </encoder>
+    <!-- 省略其它代码 ... -->
+    <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+        <!-- 优化项1：去掉写日志时立即刷磁盘的操作，以提升日志写入的性能。 -->
+        <ImmediateFlush>false</ImmediateFlush>
+        <!--格式化输出：%d表示日期，%thread表示线程名，%-5level：级别从左显示5个字符宽度%msg：日志消息，%n是换行符-->
+        <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS}-|%thread-|%level-|%X{requestId}-|%X{req.remoteHost}-|%X{req.xForwardedFor}-|%X{req.requestURI}-|%X{req.queryString}-|%X{req.userAgent}-|%logger{50}:%method-|%msg%n</pattern>
+    </encoder>
 </appender>
-所以把 :method 去掉。
+```
+所以把 %method 去掉。
 
 
-改了这两个地方后，部署到 88 机器上，再压测，QPS 提升到 2500。
+改了这两个地方后，部署代码再压测：
+![ptest-cpu-6](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-6.png "优化日志后的压测结果")
+
+发现 QPS 提升到 2500，虽然不是很明显，但也算前进了一步。
 
 
+### 第 4 轮： 优化 JVM 参数
 
-结论：
 
-还是日志的影响较大，以后日志的输入要小心啊。
+经过上一轮优化后，我们再看一下 CPU 情况。通过 `top -Hp [进程id]`，我们查看下压测状态下占 CPU 高的前几个线程：
+
+```
+13753 root 20 0 7905m 4.3g 6584 R 24.0 56.0 3:48.70 java
+13713 root 20 0 7905m 4.3g 6584 S 12.3 56.0 0:20.75 java
+13716 root 20 0 7905m 4.3g 6584 S 12.3 56.0 0:20.71 java
+13715 root 20 0 7905m 4.3g 6584 S 12.0 56.0 0:20.57 java
+13714 root 20 0 7905m 4.3g 6584 S 11.6 56.0 0:20.85 java
+20154 root 20 0 7905m 4.3g 6584 R 8.7 56.0 0:10.30 java
+20137 root 20 0 7905m 4.3g 6584 S 8.0 56.0 0:10.28 java
+20141 root 20 0 7905m 4.3g 6584 S 8.0 56.0 0:10.24 java
+20159 root 20 0 7905m 4.3g 6584 S 8.0 56.0 0:10.23 java
+14080 root 20 0 7905m 4.3g 6584 R 7.7 56.0 0:11.44 java
+20129 root 20 0 7905m 4.3g 6584 R 7.7 56.0 0:10.92 java
+20138 root 20 0 7905m 4.3g 6584 S 7.7 56.0 0:10.27 java
+20140 root 20 0 7905m 4.3g 6584 S 7.7 56.0 0:10.32 java
+20144 root 20 0 7905m 4.3g 6584 R 7.7 56.0 0:10.25 java
+20151 root 20 0 7905m 4.3g 6584 S 7.7 56.0 0:10.27 java
+......
+```
+
+1. 排名第 1 位的线程，占 CPU 24% ，经排查它仍是日志线程；
+2. 排名第 2 ~ 5 位的线程，每个占 CPU 12%（4个加起来就是 48%），经排查它们都是 GC 线程（用于 YGC）：
+![ptest-jvm-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "YGC线程信息")
+3. 排名第 6 位及以后线程，平均每个占比 7~8%，经排查大多都是 Web 容器的线程，阻塞在等待 CB 调用的返回上：
+![ptest-jvm-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "Web容器线程信息")
+<br>
+
+虽然这三个都可能是问题，但我们每次都聚焦在一个问题是解决，我们选择先解决第 2 个问题，即 GC 线程的问题。
+<br>
+
+我们用 `jstat -gcutil [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令来查一下 GC 的情况：
+![ptest-jvm-3](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-3.png "GC信息")
+每列解释如下：
+* S0：幸存1区当前使用比例
+* S1：幸存2区当前使用比例
+* E：伊甸园区使用比例
+* O：老年代使用比例
+* M：元数据区使用比例
+* CCS：压缩使用比例
+* YGC：年轻代垃圾回收次数
+* FGC：老年代垃圾回收次数
+* FGCT：老年代垃圾回收消耗时间
+* GCT：垃圾回收消耗总时间
+
+上图的红框部分，是压测开始时的 GC 信息，从图上 S0 区、S1 区在压测开始后就不停的捣腾，并且 YGC 这列数字增加得很快，说明 YGC 比较严重。<br>
+那 YGC 具体有多严重，以及 YGC 的具体情况是怎样的，
+我们用 `jstat -gcnewcapacity [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令输出 JVM 新生代的具体信息
+![ptest-jvm-4](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-4.png "YGC信息")
+每列解释如下：
+* NGCMN：新生代最小容量
+* NGCMX：新生代最大容量
+* NGC：当前新生代容量
+* S0CMX：最大幸存0区大小
+* S0C：当前幸存0区大小
+* S1CMX：最大幸存1区大小
+* S1C：当前幸存1区大小
+* ECMX：最大伊甸园区大小
+* EC：当前伊甸园区大小
+* YGC：年轻代垃圾回收次数
+* FGC：老年代回收次数
+上图的红框部分，是压测开始时的 YGC 总次数，我们发现竞然每 1 秒要执行 6 次 YGC。
+另外，NGCMX（新生代最大容量）只有 340 M，S0CMX（最大幸存 0 区大小）、S1CMX（最大幸存 1 区大小）都只有 34 M，的确是有点小。
+<br>
+
+
+因此我们在 JVM 启动命令中设置 JVM 参数， 添加 -Xmn1536m 及 -XX:SurvivorRatio=6 两个参数：
+* -Xmn1536m 是指新生代最大容易为 1.5G（总堆内存为 4 G）；
+* -XX:SurvivorRatio=6 是指 S0(幸存0区) : S1(幸存1区) : EC(伊甸园区) 的比例为 2:2:6。
+<br>
+
+设置好 JVM 参数后，我们再压测：
+![ptest-jvm-5](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-5.png "优化JVM后的压测结果")
+发现 QPS 提升到 2680（接近 2700）。
+同时GC 线程的 CPU 占用率降下来了，而YGC 的次数，也由 1 秒 6 次，变成了 2 秒 1 次。
+![ptest-jvm-6](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-6.png "优化JVM后的YGC信息")
+<br>
