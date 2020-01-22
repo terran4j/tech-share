@@ -46,8 +46,8 @@ make
 ./wrk/wrk -t300 -c400 -d30s --latency "http://10.41.135.74:8982/api/v3/dynamic/product/column/detail?productId=204918601"
 ```
 执行的结果如下：
-
 ![try-wrk](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/try-wrk.png "wrk试用")
+
 
 
 一、添加 perf4j （用于记录程序各阶段耗时统计，找出性能瓶颈）
