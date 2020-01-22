@@ -1,7 +1,7 @@
 
-<h1>在 Java 应用中提升 QPS 实战</h1>
+# 在 Java 应用中提升 QPS 实战
 
-<h3>导读</h3>
+### 导读
 作为一名开发人员，你负责的系统可能会出现更高的并发访问量的挑战，
 当然这是好事，因为这既反映出您的业务在蒸蒸日上，对你而言也是一个锤炼技术能力的技术。
 <br>
@@ -10,20 +10,40 @@
 为大家提供一个优化的思路，以供大家参考。
 
 
-<h3>问题背景</h3>
+### 问题背景
 本次性能优化的起源，是一次线上事故引起的，当时一个系统的访问量突然暴增，系统不堪重负而导致接口响应变慢，
 最终App客户端出现大量 socket timeout 异常。
 <br>
 事后笔者对这个系统进行梳理和排查，发现这个系统的业务逻辑其实并不复杂：
- ![blockchain](https://ss0.bdstatic.com/70cFvHSh_Q1YnxGkpoWK1HF6hhy/it/
- u=702257389,1274025419&fm=27&gp=0.jpg "区块链")
+
+![arch-old](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/arch-old.jpg "系统架构简图")
+
+当然这只是一个简图，真实的业务逻辑还是要比这个复杂一些，但主要的流程还是图上反映的那样：
+从缓存中读数据，读到后返回给端（没读到就抛无数据异常）。
+
+<br>
+
+按理说这个接口的 QPS 应该很高才对，但实际测下来只有 1400，所以笔者的任务就是排查性能瓶颈并解决，以提升 QPS 指标。
 
 
 
-<h3>安装接口压测工具 wrk</h3>
 
-按这个文档安装， https://www.ruoxiaozh.com/blog/article/84， 具体不介绍了。
+### 安装接口压测工具 wrk
 
+工欲善其事，必先利其器。
+要进行性能优化，对接口进行压测是经常要做的事，所以我们希望有一款简单好用的压测工具，最终我们选择了 wrk 。
+我们找了一台 CentOS 的机器作为压测机安装 wrk ，安装方法如下：
+
+```jshelllanguage
+sudo yum groupinstall 'Development Tools'
+sudo yum install openssl-devel
+sudo yum install git
+git clone https://github.com/wg/wrk.git wrk
+cd wrk
+make
+```
+
+![try-wrk](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/try-wrk.jpg "wrk试用")
 
 
 一、添加 perf4j （用于记录程序各阶段耗时统计，找出性能瓶颈）
