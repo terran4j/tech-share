@@ -20,10 +20,12 @@
 
 当然这只是一个简图，真实的业务逻辑还是要比这个复杂一些，但主要的流程还是图上反映的那样：
 从缓存中读数据，读到后返回给端（没读到就抛无数据异常）。
-
+<br>
 Web 服务器是 CentOS 系统， CPU 是 4 核，JVM堆内存大小为 4 G。
 程序是基于 SpringBoot 1.5.2 构建的，内嵌的 Tomcat 。
-
+<br>
+分布式缓存用的是 CoachBase（简称 cb），对 CoachBase 不了解的读者可以参考
+[这里](https://xiaoxiami.gitbook.io/couchbase/chapter1)
 <br>
 
 按理说这个接口的 QPS 应该很高才对，但实际测下来只有 1400，所以笔者的任务就是排查性能瓶颈并解决，以提升 QPS 指标。
@@ -163,34 +165,157 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 
 
 引入完了后，笔者用 `org.perf4j.StopWatch` 的方式在程序代码中添加性能监测代码。
-然后在本地运行程序，找指定的日志文件中查看性能统计数据，如下：
+然后在本地（IDEA debug模式）运行程序，调用几次后 per4j 输出的统计数据如下：
 
 ![per4j-log](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/per4j-log.png "per4j-log")
 
+解释笔者添加的性能监测代码的意义：
+* 1-0-queryColumnDetail 是整个接口（Controller层的方法）的耗时统计；
+* 1-x-xxxx 是在 1-0-queryColumnDetail 中的各段代码的耗时统计；
+* 2-0-queryColumnDetailStatic 等同于 1-4-queryColumnDetailStatic （queryColumnDetail 方法调用 queryColumnDetailStatic 方法）
+* 2-x-xx 是 2-0-queryColumnDetailStatic 中的各段代码耗时统计。
+* 以此类推......
+
+我们可以看到：接口的总耗时只有 25 ms，主要耗时在读 cb 缓存（23ms），其中读 cb 为 19 ms ，将 json 解析为对象 3 ms 。
 
 
 
+### 准备压测
 
-本地（IDEA debug模式）调用几次后的统计数据显示：
-
-总耗时只有 25 ms ，主要耗时在读 cb 缓存（23ms），其中读 cb 为 19 ms ，将 json 解析为对象 3 ms 。
-
-解释下：
-
-1-0-queryColumnDetail 是整个接口的耗时统计；
-1-x-xxxx 是  1-0-queryColumnDetail 的分阶段耗时统计；
+为了进行压测，我们将线上一台机器（10.41.135.74）切走流量，把含性能监控日志的代码部署到这台机器上，
+后续我们将对它进行 N 轮压测：压测 -> 优化 -> 再压测 -> 再优化......
+直到达到一个让人接受的 QPS 指标为止。
+<br>
+*（注意： 如果是服务启动过，要先压测一轮以进行预热，并且这次的数据不作准）*
 
 
+### 第 0 轮：无压力测试
 
-2-0-queryColumnDetailStatic 等同于 1-4-queryColumnDetailStatic （queryColumnDetail 方法调用 queryColumnDetailStatic 方法）
-2-x-xx 是 2-0-queryColumnDetailStatic 的分阶段耗时统计。
+我们先了解一下在无压力的情况程序性能表现如何，如果发现哪段代码耗时较长，就排查这段代码好了。
+<br>
+不压测，只访问接口一次，查看性能统计数据如下：
+
+![ptest-0](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-0.png "ptest-0")
+
+可以看出来，没有压力时，整个接口的总时长就 3 ms，基本上就不耗性能。
+也就是说，程序没有哪段代码有明显的性能损耗，只有压力上上去了才有。
+
+###　第 1 轮： 诊断是否是日志造成的性能损耗
+
+笔者首先猜想可能是日志输出较多造成的性能损耗，因为日志导致的性能问题的案例比较常见（笔者在以前的项目中就遇到过类似的问题）。
+<br>
+但是猜归猜，还需要实际测试来确认这个猜想，所以笔者打算在有日志输出时压测一次，在无日志输出时再压测一次，比较下它们的 QPS 差异。
+
+这里先交待一下原来的 logback.xml 日志配置如下：
+```xml
+<property name="LOG_HOME" value="/data/logs/kpp-lighthouse" />
+<!-- 正常 info 级别的程序日志输出 -->
+<appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <File>${LOG_HOME}/lighthouse-cms-dynamic.log</File>
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+    <!--日志文件输出的文件名-->
+    <FileNamePattern>${LOG_HOME}/lighthouse-cms-dynamic.%d{yyyy-MM-dd}.log.gz</FileNamePattern>
+    <!--日志文件保留天数-->
+    <MaxHistory>60</MaxHistory>
+    </rollingPolicy>
+    <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+    <!--格式化输出：%d表示日期，%thread表示线程名，%-5level：级别从左显示5个字符宽度%msg：日志消息，%n是换行符-->
+    <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS}-|%thread-|%level-|%X{requestId}-|%X{req.remoteHost}-|%X{req.xForwardedFor}-|%X{req.requestURI}-|%X{req.queryString}-|%X{req.userAgent}-|%logger{50}:%method-|%msg%n</pattern>
+    </encoder>
+</appender>
+<appender name="ASYNC_DAILY_ROLLING_FILE" class="ch.qos.logback.classic.AsyncAppender">
+    <!-- 不丢失日志.默认的,如果队列的[如配置80,则80%已满,则会丢弃TRACT、DEBUG、INFO级别的日志] -->
+    <discardingThreshold>0</discardingThreshold>
+    <!-- 更改默认的队列的深度,该值会影响性能.默认值为256 -->
+    <queueSize>512</queueSize>
+    <includeCallerData>true</includeCallerData>
+    <!-- 添加附加的appender,最多只能添加一个 -->
+    <appender-ref ref="FILE"/>
+</appender>
+<logger name="o.s">
+    <level value="DEBUG" />
+</logger>
+<logger name="c.i.input.dao">
+    <level value="DEBUG" />
+</logger>
+<root level="INFO">
+    <appender-ref ref="ASYNC_DAILY_ROLLING_FILE"/>
+</root>
+```
+
+日志配置用的是 `RollingFileAppender`，是一种很常见的日志配置方法（细心的读者们发现什么端倪了么？）
+<br>
+
+在以上日志配置下，笔者起 300 并发进行压测：
+```
+./wrk -t300 -c600 -d60s http://10.41.135.74:8982/api/v3/dynamic/product/column/detail?productId=204918601
+```
+
+结果如下：
+
+![ptest-log-1-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-log-1-1.png "有日志下的压测结果")
+
+QPS 只有 1400 左右。
+<br>
+
+然后我们将所有日志级别都调成 ERROR 级别，再压测：
+
+![ptest-log-1-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-log-1-1.png "无日志下的压测结果")
+
+发现 QPS 从 1400 提升到 2400，因此确认了日志输出对程序性能有较大损耗。
 
 
+### 第 2 轮：优化日志配置
 
-三、部署到压测环境，进行压测
-部署含性能监控日志的代码到线上机器  10.41.135.74，此机器无任何其它流量，我们将对它进行 N 轮压测。
+虽然从上一轮我们知道是日志输出的问题，但笔者也不敢真将日志输出都关闭，万一哪天出线上 BUG 了，没有日志岂不是得抓狂？？<br>
 
-（注意： 如果是服务启动过，要先压测一轮以进行预热，并且这次的数据不作准）
+经过笔者对日志配置仔细分析，发现有几个可优化项：
+1：将 ImmediateFlush 改为 false 。为 false 的意思是去掉写日志时立即刷磁盘的操作，理论上这样可以提升日志写入的性能。
+2：将 queueSize 值改大。queueSize 值是指定日志缓存队列（一个 BlockingQueue）的最大容量，改大点可以提升性能（但也不要太大，以免占用太多内存）。
+ 笔者计算了一下： 一条日志按 500B 算（根据当前业务场景），10K条日志也就5M，因此这个值从 512 改到 1W 。
+3：将 includeCallerData 从 true 改为 false 。includeCallerData 表示是否提取调用者数据，这个值被设置为true的代价是相当昂贵的，
+ 为了提升性能，改为 false，即：当 event 被加入 BlockingQueue 时，event 关联的调用者数据不会被提取，只有线程名这些比较简单的数据。
+<br>
 
-具体排查及优化过程，见子页面。
-具体代码，在分支 cms-ptest，欢迎大家 check out 出来查看。
+
+调整参数后的日志配置如下：
+```xml
+<!-- 正常 info 级别的程序日志输出 -->
+<appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <File>${LOG_HOME}/lighthouse-cms-dynamic.log</File>
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+        <!--日志文件输出的文件名-->
+        <FileNamePattern>${LOG_HOME}/lighthouse-cms-dynamic.%d{yyyy-MM-dd}.log.gz</FileNamePattern>
+        <!--日志文件保留天数-->
+        <MaxHistory>60</MaxHistory>
+    </rollingPolicy>
+    <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
+        <!-- 优化项1：去掉写日志时立即刷磁盘的操作，以提升日志写入的性能。 -->
+        <ImmediateFlush>false</ImmediateFlush>
+        <!--格式化输出：%d表示日期，%thread表示线程名，%-5level：级别从左显示5个字符宽度%msg：日志消息，%n是换行符-->
+        <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS}-|%thread-|%level-|%X{requestId}-|%X{req.remoteHost}-|%X{req.xForwardedFor}-|%X{req.requestURI}-|%X{req.queryString}-|%X{req.userAgent}-|%logger{50}:%method-|%msg%n</pattern>
+    </encoder>
+</appender>
+<appender name="ASYNC_DAILY_ROLLING_FILE" class="ch.qos.logback.classic.AsyncAppender">
+    <!-- 不丢失日志.默认的,如果队列的[如配置80,则80%已满,则会丢弃TRACT、DEBUG、INFO级别的日志] -->
+    <discardingThreshold>0</discardingThreshold>
+    <!-- 优化项2：本项是暂存日志记录的 BlockingQueue 的最大容量，改大点可以提升性能（但也不要太大，会占用内存），
+        一条日志500B算，10K条日志也就5M，因此这个值从 512 改到 1W 。 -->
+    <queueSize>10000</queueSize>
+    <!-- 优化项3：includeCallerData表示是否提取调用者数据，这个值被设置为true的代价是相当昂贵的，
+        为了提升性能，默认为false，即：当event被加入BlockingQueue时，event关联的调用者数据不会被提取，只有线程名这些比较简单的数据
+        因此这个值从 true 改为 false 。
+    -->
+    <includeCallerData>false</includeCallerData>
+    <!-- 添加附加的appender,最多只能添加一个 -->
+    <appender-ref ref="FILE"/>
+</appender>
+<root level="INFO">
+    <appender-ref ref="ASYNC_DAILY_ROLLING_FILE"/>
+</root>
+```
+
+改后再进行压测，结果如下：
+![ptest-log-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-log-2.png "优化日志后的压测结果")
+
+结论： 优化日志配置后，QPS提升 到 2300 ，虽不如完全关闭日志后的 2400 ，但也相差不多了。
