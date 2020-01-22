@@ -26,15 +26,13 @@
 按理说这个接口的 QPS 应该很高才对，但实际测下来只有 1400，所以笔者的任务就是排查性能瓶颈并解决，以提升 QPS 指标。
 
 
-
-
 ### 安装接口压测工具 wrk
 
 工欲善其事，必先利其器。
 要进行性能优化，对接口进行压测是经常要做的事，所以我们希望有一款简单好用的压测工具，最终我们选择了 wrk 。
 我们找了一台 CentOS 的机器作为压测机安装 wrk ，安装方法如下：
 
-```jshelllanguage
+```
 sudo yum groupinstall 'Development Tools'
 sudo yum install openssl-devel
 sudo yum install git
@@ -43,7 +41,13 @@ cd wrk
 make
 ```
 
-![try-wrk](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/try-wrk.jpg "wrk试用")
+安装好后，我们对一台 web 服务器直接发起 HTTP 请求进行压测：
+```
+./wrk/wrk -t300 -c400 -d30s --latency "http://10.41.135.74:8982/api/v3/dynamic/product/column/detail?productId=204918601"
+```
+执行的结果如下：
+
+![try-wrk](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/try-wrk.png "wrk试用")
 
 
 一、添加 perf4j （用于记录程序各阶段耗时统计，找出性能瓶颈）
