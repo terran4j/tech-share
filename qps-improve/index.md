@@ -56,10 +56,10 @@ make
 
 ![try-wrk](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/try-wrk.png "wrk试用")
 
-参数说明：
-* -t300 指起 300 个线程来执行请求，每个线程在执行完一个HTTP请求后会立即执行下一个HTTP请求。
-* -c400 指建立400个连接，用于 HTTP 请求，而不是每次请求都重新建立连接。
-* -d30s 指本轮压测持续时间为 30 秒。
+参数说明：<br>
+* -t300 指起 300 个线程来执行请求，每个线程在执行完一个HTTP请求后会立即执行下一个HTTP请求。<br>
+* -c400 指建立400个连接，用于 HTTP 请求，而不是每次请求都重新建立连接。<br>
+* -d30s 指本轮压测持续时间为 30 秒。<br>
 
 结果说明：
 * Requests/sec 指每秒处理的请求数量，也就是我们说的 QPS （Query Per Second）
@@ -169,12 +169,12 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 
 ![per4j-log](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/per4j-log.png "per4j-log")
 
-上图中的 Tag 列是笔者添加性能监测代码时，给每段代码起的名字，这里解释它们的意义：
-* 1-0-queryColumnDetail 是整个接口（Controller层的方法）的耗时统计；
-* 1-x-xxxx 是在 1-0-queryColumnDetail 中的各段代码的耗时统计；
-* 2-0-queryColumnDetailStatic 等同于 1-4-queryColumnDetailStatic （queryColumnDetail 方法调用 queryColumnDetailStatic 方法）
-* 2-x-xx 是 2-0-queryColumnDetailStatic 中的各段代码耗时统计。
-* 以此类推......
+上图中的 Tag 列是笔者添加性能监测代码时，给每段代码起的名字，这里解释它们的意义：<br>
+* 1-0-queryColumnDetail 是整个接口（Controller层的方法）的耗时统计；<br>
+* 1-x-xxxx 是在 1-0-queryColumnDetail 中的各段代码的耗时统计；<br>sdf sssssssss
+* 2-0-queryColumnDetailStatic 等同于 1-4-queryColumnDetailStatic （queryColumnDetail 方法调用 queryColumnDetailStatic 方法）<br>
+* 2-x-xx 是 2-0-queryColumnDetailStatic 中的各段代码耗时统计。<br> 
+* 以此类推......<br>
 
 我们可以看到：接口的总耗时只有 25 ms，主要耗时在读 cb 缓存（23ms），其中读 cb 为 19 ms ，将 json 解析为对象 3 ms 。
 
@@ -638,4 +638,4 @@ QPS 进一步提升到 5000，说明在“恰当”的场景下，在分布式�
 * 聚焦最大瓶颈：如果有多个优化方向，则先评估哪一个方向的问题是最大瓶颈，然后集中精力只优化这个最大瓶颈，优化完后再评估下一个最大瓶颈并解决，如此反复；
 * 
 
-那实际上还有没有优化空间呢？笔者判断应该还是有不少优化空间的，感兴趣的读者可以自己尝试下哦。
+那实际上还有没有优化空间呢？笔者判断应该还是有不少优化空间的，感兴趣�
