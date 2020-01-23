@@ -71,7 +71,7 @@ perf4j 是一款用于诊断 Java 应用程序性能的开源工具，它可以�
 为了知晓在高并发情况下，程序各阶段的耗时，我们先引入 perf4j 开源项目，步骤如下：
 
 
-1. 在项目 pom.xml 中添加 perf4j 依赖:
+* 在项目 pom.xml 中添加 perf4j 依赖:
 
 ```xml
 <dependency>
@@ -81,7 +81,7 @@ perf4j 是一款用于诊断 Java 应用程序性能的开源工具，它可以�
 ```
 
 
-2. 在 Application 类（或其它 Configuration 类中添加 TimingAspect 的 Bean 定义）
+* 在 Application 类（或其它 Configuration 类）中添加 TimingAspect 的 Bean 定义：
 
 ```java
 @Bean
@@ -93,7 +93,8 @@ public TimingAspect timingAspect() {
 注意： 我们的系统的日志库用的是 slf4j，因此要引的是 org.perf4j.slf4j.aop 包里面的 TimingAspect 类，不要引错了哦。
 
 
-3. 对想要监测的代码，在方法上添加  @Profiled 注解，如：
+* 对想要监测的代码，在方法上添加  @Profiled 注解，如：
+
 ```java
 @Profiled
 @RequestMapping(name = "请求 Card 化页面数据", value = "/cpage", method = RequestMethod.GET)
@@ -130,7 +131,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 注意 SpringBoot 框架自身也提供了一个 StopWatch 类（在包 `org.springframework.util` 中），
 它没有 `org.perf4j` 提供的 StopWatch 类的功能强大。
 
-4. 在 logback 日志文件中定义 Perf4j 的 Appender（推荐 Perf4j 的日志单独输出到一个文件），如：
+* 在 logback 日志文件中定义 Perf4j 的 Appender（推荐 Perf4j 的日志单独输出到一个文件），如：
 
 ```xml
 <property name="LOG_HOME" value="/data/logs/kpp-lighthouse" />
@@ -171,7 +172,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 
 上图中的 Tag 列是笔者添加性能监测代码时，给每段代码起的名字，这里解释它们的意义：<br>
 * 1-0-queryColumnDetail 是整个接口（Controller层的方法）的耗时统计；<br>
-* 1-x-xxxx 是在 1-0-queryColumnDetail 中的各段代码的耗时统计；<br>sdf sssssssss
+* 1-x-xxxx 是在 1-0-queryColumnDetail 中的各段代码的耗时统计；<br>
 * 2-0-queryColumnDetailStatic 等同于 1-4-queryColumnDetailStatic （queryColumnDetail 方法调用 queryColumnDetailStatic 方法）<br>
 * 2-x-xx 是 2-0-queryColumnDetailStatic 中的各段代码耗时统计。<br> 
 * 以此类推......<br>
@@ -207,6 +208,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 但是猜归猜，还需要实际测试来确认这个猜想，所以笔者打算在有日志输出时压测一次，在无日志输出时再压测一次，比较下它们的 QPS 差异。
 
 这里先交待一下原来的 logback.xml 日志配置如下：
+
 ```xml
 <property name="LOG_HOME" value="/data/logs/kpp-lighthouse" />
 <!-- 正常 info 级别的程序日志输出 -->
@@ -269,16 +271,16 @@ QPS 只有 1400 左右。
 
 虽然从上一轮我们知道是日志输出的问题，但笔者也不敢真将日志输出都关闭，万一哪天出线上 BUG 了，没有日志岂不是得抓狂？？<br>
 
-经过笔者对日志配置仔细分析，发现有几个可优化项：
-1：将 ImmediateFlush 改为 false 。为 false 的意思是去掉写日志时立即刷磁盘的操作，理论上这样可以提升日志写入的性能。
-2：将 queueSize 值改大。queueSize 值是指定日志缓存队列（一个 BlockingQueue）的最大容量，改大点可以提升性能（但也不要太大，以免占用太多内存）。
- 笔者计算了一下： 一条日志按 500B 算（根据当前业务场景），10K条日志也就5M，因此这个值从 512 改到 1W 。
-3：将 includeCallerData 从 true 改为 false 。includeCallerData 表示是否提取调用者数据，这个值被设置为true的代价是相当昂贵的，
- 为了提升性能，改为 false，即：当 event 被加入 BlockingQueue 时，event 关联的调用者数据不会被提取，只有线程名这些比较简单的数据。
-<br>
+经过笔者对日志配置仔细分析，发现有几个可优化项：<br>
+* 一、将 ImmediateFlush 改为 false 。为 false 的意思是去掉写日志时立即刷磁盘的操作，理论上这样可以提升日志写入的性能。<br>
+* 二、将 queueSize 值改大。queueSize 值是指定日志缓存队列（一个 BlockingQueue）的最大容量，改大点可以提升性能（但也不要太大，以免占用太多内存）。
+ 笔者计算了一下： 一条日志按 500B 算（根据当前业务场景），10K条日志也就5M，因此这个值从 512 改到 1W 。<br>
+* 三、将 includeCallerData 从 true 改为 false 。includeCallerData 表示是否提取调用者数据，这个值被设置为true的代价是相当昂贵的，
+ 为了提升性能，改为 false，即：当 event 被加入 BlockingQueue 时，event 关联的调用者数据不会被提取，只有线程名这些比较简单的数据。<br>
 
 
 调整参数后的日志配置如下：
+
 ```xml
 <!-- 正常 info 级别的程序日志输出 -->
 <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
@@ -328,21 +330,20 @@ QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最�
 这一轮我们尝试分析下压测状态下的机器性能，如 CPU 内存 网络IO 等指标，看能不能找出性能瓶颈。
 <br>
 
-我们先查看 java 进程的性能：
-1. 用 `java -ef | grep java` 查看 java 程序的`进程id`(这步开发者应该都会吧，这里就省略截图了)；
-2. 用 `pidstat -p [进程id] [打印的间隔时间] [打印次数]` 命令来打印出 java 进程的 CPU 使用情况：
+我们先查看 java 进程的性能：<br>
+* 用 `java -ef | grep java` 查看 java 程序的`进程id`(这步开发者应该都会吧，这里就省略截图了)；<br>
+* 用 `pidstat -p [进程id] [打印的间隔时间] [打印次数]` 命令来打印出 java 进程的 CPU 使用情况：
 
 ![ptest-cpu-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-1.png "进程CPU使用情况")
 
-笔者发现，一旦压测开始， CPU 直接涨到 100% （上图红框所示）。
-（这里显示的 CPU 为每个核的平均值，而不是加和值，因此虽然是 4 核，100% 指 CPU 已打满了）。
-3. 为了知道是具体哪个线程占 CPU 高，用 `top -Hp [进程id]` 来查看线程的 CPU 占用情况：
+笔者发现，一旦压测开始， CPU 直接涨到 100% （上图红框所示）。（这里显示的 CPU 为每个核的平均值，而不是加和值，因此虽然是 4 核，100% 指 CPU 已打满了）。<br>
+* 为了知道是具体哪个线程占 CPU 高，用 `top -Hp [进程id]` 来查看线程的 CPU 占用情况：
 
 ![ptest-cpu-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-2.png "线程CPU使用情况")
 
-发现是 id 为 63099 的线程占 CPU 最高，为 46% 。
-4. 用 `printf "%x\n" [进程id]` 打印出此线程 id 的十六进制值： f67b 。
-5. 用 `jstack [进程id] |grep -B 1 -C 20 [线程id十六进制值]` 打印出此线程的堆栈信息（建议多打印几次），如下：
+发现是 id 为 63099 的线程占 CPU 最高，为 46% 。<br>
+* 用 `printf "%x\n" [进程id]` 打印出此线程 id 的十六进制值： f67b 。<br>
+* 用 `jstack [进程id] |grep -B 1 -C 20 [线程id十六进制值]` 打印出此线程的堆栈信息（建议多打印几次），如下：
 
 ![ptest-cpu-3](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-3.png "线程堆栈1")
 ![ptest-cpu-4](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-4.png "线程堆栈2")
@@ -354,16 +355,16 @@ QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最�
 <appender name="ASYNC_DAILY_ROLLING_FILE" class="ch.qos.logback.classic.AsyncAppender">
 ```
 
-具体来说，有两个问题：
-1. logback 用 ArrayBlockingQueue 缓存日志对象，似乎在 take 端 和 poll 端存在资源竞争（ArrayBlockingQueue 存取元素用的是一把锁）。
-2. 仍有获取 caller 数据的情况（还记得第 2 轮的优化项 3 么？）
-<br>
+具体来说，有两个问题：<br>
+* 一、 logback 用 ArrayBlockingQueue 缓存日志对象，似乎在 take 端 和 poll 端存在资源竞争（ArrayBlockingQueue 存取元素用的是一把锁）。<br>
+* 二、 仍有获取 caller 数据的情况（还记得第 2 轮的优化项 3 么？）<br>
 
 对第 1 个问题，网上查了下，logback 的低版本在创建 ArrayBlockingQueue 时，用的是公平锁，的确会有性能问题
 （它在高版本解决了，用非公平锁），在我们项目中升级 logback jar 的改动较大，笔者简单起见直接 hack 改它的源码，将类 AsyncAppenderBase 的源码单独拷贝出来：
 ![ptest-cpu-5](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-5.png "修改AsyncAppenderBase源码")
 
 然后进行修改：
+
 ```java
 public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implements AppenderAttachable<E> {
     
@@ -392,6 +393,7 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
     
     // 省略其它代码...
 ```
+
 其实只改了一行源代码，就是将：
 `this.blockingQueue = new ArrayBlockingQueue(this.queueSize);`
 改成：
@@ -400,6 +402,7 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 <br>
 
 对第 2 个问题，终于在 logback.xml 中找到了问题所在，原来日志配置中有提取 method 信息（<pattern>元素中有 %method），还是会触发读取调用者信息：
+
 ```xml
 <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
     <!-- 省略其它代码 ... -->
@@ -411,6 +414,7 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
     </encoder>
 </appender>
 ```
+
 所以把 %method 去掉。
 
 
@@ -444,34 +448,33 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 ......
 ```
 
-1. 排名第 1 位的线程，占 CPU 24% ，经排查它仍是日志线程；
-2. 排名第 2 ~ 5 位的线程，每个占 CPU 12%（4个加起来就是 48%），经排查它们都是 GC 线程（用于 YGC）：
+* 排名第 1 位的线程，占 CPU 24% ，经排查它仍是日志线程；<br>
+* 排名第 2 ~ 5 位的线程，每个占 CPU 12%（4个加起来就是 48%），经排查它们都是 GC 线程（用于 YGC）：
 
 ![ptest-jvm-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "YGC线程信息")
 
-3. 排名第 6 位及以后线程，平均每个占比 7~8%，经排查大多都是 Web 容器的线程，阻塞在等待 CB 调用的返回上：
+* 排名第 6 位及以后线程，平均每个占比 7~8%，经排查大多都是 Web 容器的线程，阻塞在等待 CB 调用的返回上：
 
 ![ptest-jvm-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "Web容器线程信息")
 
 
-虽然这三个都可能是问题，但我们每次都聚焦在一个问题是解决，我们选择先解决第 2 个问题，即 GC 线程的问题。
-<br>
+虽然这三个都可能是问题，但我们每次都聚焦在一个问题是解决，我们选择先解决第 2 个问题，即 GC 线程的问题。<br>
 
 我们用 `jstat -gcutil [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令来查一下 GC 的情况：
 
 ![ptest-jvm-3](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-3.png "GC信息")
 
-每列解释如下：
-* S0：幸存1区当前使用比例
-* S1：幸存2区当前使用比例
-* E：伊甸园区使用比例
-* O：老年代使用比例
-* M：元数据区使用比例
-* CCS：压缩使用比例
-* YGC：年轻代垃圾回收次数
-* FGC：老年代垃圾回收次数
-* FGCT：老年代垃圾回收消耗时间
-* GCT：垃圾回收消耗总时间
+每列解释如下：<br>
+* S0：幸存1区当前使用比例<br>
+* S1：幸存2区当前使用比例<br>
+* E：伊甸园区使用比例<br>
+* O：老年代使用比例<br>
+* M：元数据区使用比例<br>
+* CCS：压缩使用比例<br>
+* YGC：年轻代垃圾回收次数<br>
+* FGC：老年代垃圾回收次数<br>
+* FGCT：老年代垃圾回收消耗时间<br>
+* GCT：垃圾回收消耗总时间<br>
 
 上图的红框部分，是压测开始时的 GC 信息，从图上 S0 区、S1 区在压测开始后就不停的捣腾，并且 YGC 这列数字增加得很快，说明 YGC 比较严重。<br>
 那 YGC 具体有多严重，以及 YGC 的具体情况是怎样的，
@@ -479,27 +482,25 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 
 ![ptest-jvm-4](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-4.png "YGC信息")
 
-每列解释如下：
-* NGCMN：新生代最小容量
-* NGCMX：新生代最大容量
-* NGC：当前新生代容量
-* S0CMX：最大幸存0区大小
-* S0C：当前幸存0区大小
-* S1CMX：最大幸存1区大小
-* S1C：当前幸存1区大小
-* ECMX：最大伊甸园区大小
-* EC：当前伊甸园区大小
-* YGC：年轻代垃圾回收次数
-* FGC：老年代回收次数
+每列解释如下：<br>
+* NGCMN：新生代最小容量<br>
+* NGCMX：新生代最大容量<br>
+* NGC：当前新生代容量<br>
+* S0CMX：最大幸存0区大小<br>
+* S0C：当前幸存0区大小<br>
+* S1CMX：最大幸存1区大小<br>
+* S1C：当前幸存1区大小<br>
+* ECMX：最大伊甸园区大小<br>
+* EC：当前伊甸园区大小<br>
+* YGC：年轻代垃圾回收次数<br>
+* FGC：老年代回收次数<br>
 上图的红框部分，是压测开始时的 YGC 总次数，我们发现竞然每 1 秒要执行 6 次 YGC。
-另外，NGCMX（新生代最大容量）只有 340 M，S0CMX（最大幸存 0 区大小）、S1CMX（最大幸存 1 区大小）都只有 34 M，的确是有点小。
-<br>
+另外，NGCMX（新生代最大容量）只有 340 M，S0CMX（最大幸存 0 区大小）、S1CMX（最大幸存 1 区大小）都只有 34 M，的确是有点小。<br>
 
 
-因此我们在 JVM 启动命令中设置 JVM 参数， 添加 -Xmn1536m 及 -XX:SurvivorRatio=6 两个参数：
-* -Xmn1536m 是指新生代最大容易为 1.5G（总堆内存为 4 G）；
-* -XX:SurvivorRatio=6 是指 S0(幸存0区) : S1(幸存1区) : EC(伊甸园区) 的比例为 2:2:6。
-<br>
+因此我们在 JVM 启动命令中设置 JVM 参数， 添加 -Xmn1536m 及 -XX:SurvivorRatio=6 两个参数：<br>
+* -Xmn1536m 是指新生代最大容易为 1.5G（总堆内存为 4 G）；<br>
+* -XX:SurvivorRatio=6 是指 S0(幸存0区) : S1(幸存1区) : EC(伊甸园区) 的比例为 2:2:6。<br>
 
 设置好 JVM 参数后，我们再压测：
 
@@ -514,12 +515,13 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 ### 第 5 轮： 将 Web 容器从 Tomcat 改为 Undertow
 
 经过上一轮优化后，发现不再有明显 CPU 高的线程(最高还是日志线程 14%)，
-但 Web 容器中的 Worker 线程平均为 7%，因此可以考虑下对 Web 容器进行优化。
+但 Web 容器中的 Worker 线程平均为 7%，因此可以考虑下对 Web 容器进行优化。<br>
 
 在网上查资料，有的文章分析说 Undertow 的性能比 Tomcat 好，
-因此我们将 SpringBoot 中默认的 Tomcat 改为 Undertow 试试看。
+因此我们将 SpringBoot 中默认的 Tomcat 改为 Undertow 试试看。<br>
 
 首先，在 pom.xml 配置如下：
+
 ```xml
 <!-- 网上说 Undertow 的性能比 Tomcat 好，试试看？ -->
 <dependency>
@@ -541,6 +543,7 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 ```
 
 然后，在 application.yml 文件中配置 Undertow 的相关参数：
+
 ```yaml
 server:
     port: 8982
@@ -559,6 +562,7 @@ server:
 ```
 
 再压测:
+
 ![ptest-undertow-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-undertow-1.png "优化Web容器后的压测结果")
 
 发现 QPS 提升到 3800，果然 Undertow 的性能比 Tomcat 好不少。
@@ -567,10 +571,10 @@ server:
 ### 第 6 轮： 添加加上内存缓存
 
 之前发现 Web 容器的 Worker 线程大多阻塞在调用 cb 上，考虑到当前场景下 cb 中的数据是静态（每 5 分钟变化一次），
-可以进行内存缓存，也就是如果从 cb 中读到了数据，就放在内存缓存中（当然要将内存缓存设置一个比较短的过期时间）。
-<br>
+可以进行内存缓存，也就是如果从 cb 中读到了数据，就放在内存缓存中（当然要将内存缓存设置一个比较短的过期时间）。<br>
 
 经过比较，我们选择了 Guava 作为内存缓存的实现方案，代码如下：
+
 ```java
 @Configuration
 @EnableCaching
@@ -589,11 +593,11 @@ public class GuavaCacheConfig {
 ```
 
 经过计算，本场景下一条缓存平均大小为 10KB，1W 条就是 100M，而 JVM 堆内存有 4G，理论上是完全撑得住的。
-在 cb 中的数据，是每 5 分钟刷新一次，因此内存缓存设置为 10 秒过期，也完全没有问题。
-<br>
+在 cb 中的数据，是每 5 分钟刷新一次，因此内存缓存设置为 10 秒过期，也完全没有问题。<br>
 
 
 然后在我们在读 cb 的地方加上内存缓存，代码如下：
+
 ```java
 @Cacheable(value = "column-detail", key = "#qipuId")
 public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
@@ -613,6 +617,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 即缓存块名为 column-detail，其中每条缓存的 key 为参数 qipuId 的值。
 
 考虑到加上内存缓存后，处理请求的 Worker 线程 Blocking 时间会大大减少，这里改小了 undertow 的线程数：
+
 ```yaml
 server:
     port: 8982
@@ -620,11 +625,13 @@ server:
         ioThreads: 4
         workerThreads: 32
 ```
+
 io 线程数改为 4 （因为被测机器的 CPU 只有 4 核）， worker 线程数改为 32 （即 io 线程数的 8 倍）。
 注意：并不是线程数越多越小，因为太多线程数，资源竞争加剧反而对性能有损耗。
 
 
 将修改的代码部署到压测环境，再压测：
+
 ![ptest-cache-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cache-1.png "添加内存缓存后的压测结果")
 
 QPS 进一步提升到 5000，说明在“恰当”的场景下，在分布式缓存的基础上加上内存缓存，能更进一步提升性能。
@@ -632,10 +639,10 @@ QPS 进一步提升到 5000，说明在“恰当”的场景下，在分布式�
 
 ### 总结与展望
 
-由于 5000 的 QPS 对当前业务场景已经足够用了，因此笔者也不打算花时间继续优化了。
-最后总结下做性能优化的一些思路和原则：
-* 数据驱动：通过“压测 + 观察各种数据”的方式，来分析程序的性能瓶颈，不要在猜想下尝试（即使猜想，也要先想办法验证你的猜想再动手优化）；
-* 聚焦最大瓶颈：如果有多个优化方向，则先评估哪一个方向的问题是最大瓶颈，然后集中精力只优化这个最大瓶颈，优化完后再评估下一个最大瓶颈并解决，如此反复；
-* 
+由于 5000 的 QPS 对当前业务场景已经足够用了，因此笔者也不打算花时间继续优化了。<br>
+最后总结下做性能优化的一些思路和原则：<br>
+* 数据驱动：通过“压测 + 观察数据”的方式，来分析程序的性能瓶颈，而不要想当然（即使是猜想，也要先想办法验证你的猜想再动手优化）；<br>
+* 聚焦最大瓶颈：如果有多个优化方向，则先评估哪一个方向的问题是最大瓶颈，然后集中精力去优化这个最大瓶颈，优化完后再评估下一个最大瓶颈并解决，如此迭代前进；<br>
+* 利用工具： 现在业界性能优化的工具还是比较多的，用好这些工具可以事半功倍，有些特殊场景即使没有好用的工具，也可以花点精力制造些小工具来使用。<br>
 
-那实际上还有没有优化空间呢？笔者判断应该还是有不少优化空间的，感兴趣�
+那实际上还有没有优化空间呢？笔者判断应该还是有不少优化空间的，感兴趣读可以继续尝试更多的方案哦！
