@@ -3,7 +3,7 @@
 
 ### 导读
 
-作为一名开发人员，你负责的系统可能会出现更高的并发访问量的挑战，
+作为一名开发人员，你负责的系统可能会出现高并发的挑战。
 当然这是好事，因为这既反映出您的业务在蒸蒸日上，对你而言也是一个锤炼技术能力的机会。
 <br>
 本文的主题是记录笔者在工作过程中的一次 Java Web 应用性能优化过程，包括：如何去排查性能问题，如何利用工具，以及如何去解决等，以供大家参考。
@@ -11,14 +11,16 @@
 
 ### 问题背景
 
-本次性能优化的起源，是一次线上事故引起的，当时一个系统的访问量突然暴增，系统不堪重负而导致接口响应变慢，
+本次性能优化的起源，是一次线上事故引起的，当时一个接口的访问量突然暴增，系统不堪重负而导致接口响应变慢，
 最终 App 端的接口调用出现大量 socket timeout 异常。
 <br>
-事后笔者对这个系统进行梳理和排查，发现这个系统的业务逻辑其实并不复杂：
+事后笔者任务就是对这个接口排查性能瓶颈并解决，以提升 QPS 指标。<br>
+经过梳理和排查，总结这个模块的架构如下：
 
 ![arch-old](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/arch-old.jpg "系统架构简图")
 
-当然这只是一个简图，真实的业务逻辑还是要比这个复杂一点，但主要的流程还是图上反映的那样，即：从缓存中读数据，读到后返回给端上（没读到就抛无数据异常了）。
+当然这只是一个简图，真实的业务逻辑还是要比这个复杂一点，但本质上它的业务逻辑并不复杂，主要的流程还是图上反映的那样，
+即：从缓存中读数据，读到后返回给端上（没读到就抛无数据异常了）。
 <br>
 
 Web 服务器是 CentOS 系统， CPU 是 4 核的，JVM 堆内存大小为 4 G。
@@ -167,7 +169,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 
 ![per4j-log](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/per4j-log.png "per4j-log")
 
-解释笔者添加的性能监测代码的意义：
+上图中的 Tag 列是笔者添加性能监测代码时，给每段代码起的名字，这里解释它们的意义：
 * 1-0-queryColumnDetail 是整个接口（Controller层的方法）的耗时统计；
 * 1-x-xxxx 是在 1-0-queryColumnDetail 中的各段代码的耗时统计；
 * 2-0-queryColumnDetailStatic 等同于 1-4-queryColumnDetailStatic （queryColumnDetail 方法调用 queryColumnDetailStatic 方法）
