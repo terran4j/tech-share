@@ -6,21 +6,24 @@
 作为一名开发人员，你负责的系统可能会出现高并发的挑战。
 当然这是好事，因为这既反映出您的业务在蒸蒸日上，对你而言也是一个锤炼技术能力的机会。
 <br>
-本文的主题是记录笔者在工作过程中的一次 Java Web 应用性能优化过程，包括：如何去排查性能问题，如何利用工具，以及如何去解决等，以供大家参考。
-
+本文记录了笔者在工作过程中的一次 Java Web 应用性能优化过程，包括：如何去排查性能问题，如何利用工具，以及如何去解决等。
+现抛砖引玉分享给大家，以供大家参考。
+<br>
 
 ### 问题背景
 
 本次性能优化的起源，是一次线上事故引起的，当时一个接口的访问量突然暴增，系统不堪重负而导致接口响应变慢，
-最终 App 端的接口调用出现大量 socket timeout 异常。
+最终客户端调用接口时，出现大量 socket timeout 异常。
 <br>
 事后笔者任务就是对这个接口排查性能瓶颈并解决，以提升 QPS 指标。<br>
-经过梳理和排查，总结这个模块的架构如下：
+<br>
+
+经过梳理，总结这个模块的架构如下：
 
 ![arch-old](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/arch-old.jpg "系统架构简图")
 
-当然这只是一个简图，真实的业务逻辑还是要比这个复杂一点，但本质上它的业务逻辑并不复杂，主要的流程还是图上反映的那样，
-即：从缓存中读数据，读到后返回给端上（没读到就抛无数据异常了）。
+当然这只是一个简图，真实的业务逻辑还是要比这个复杂一点，但总的说来它的业务逻辑还是不复杂的，
+主要的流程还是图上反映的那样，即：从缓存中读数据，读到后返回给客户端（没读到就抛异常告诉客户端无数据）。
 <br>
 
 Web 服务器是 CentOS 系统， CPU 是 4 核的，JVM 堆内存大小为 4 G。
@@ -31,7 +34,7 @@ Web 服务器是 CentOS 系统， CPU 是 4 核的，JVM 堆内存大小为 4 G�
 <br>
 
 按理说这个接口的 QPS 应该很高才对，但实际测下来只有 1400，所以笔者的任务就是排查性能瓶颈并解决，以提升 QPS 指标。
-
+<br>
 
 ### 安装接口压测工具 wrk
 
@@ -58,11 +61,15 @@ make
 
 参数说明：<br>
 * -t300 指起 300 个线程来执行请求，每个线程在执行完一个HTTP请求后会立即执行下一个HTTP请求。<br>
-* -c400 指建立400个连接，用于 HTTP 请求，而不是每次请求都重新建立连接。<br>
+* -c400 指在连接池中建立400个连接，用于 HTTP 请求，而不是每次请求都重新建立连接。<br>
 * -d30s 指本轮压测持续时间为 30 秒。<br>
 
-结果说明：
-* Requests/sec 指每秒处理的请求数量，也就是我们说的 QPS （Query Per Second）
+结果说明：<br>
+* Requests/sec 指每秒处理的请求数量，也就是我们说的 QPS （Query Per Second）；<br>
+* Transfer/sec 指每秒传输的数据量大小；<br>
+
+从上图看，目前的 QPS 在 1400 左右。
+<br>
 
 
 ### 引入 Perf4j 
@@ -129,7 +136,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 ```
 
 注意 SpringBoot 框架自身也提供了一个 StopWatch 类（在包 `org.springframework.util` 中），
-它没有 `org.perf4j` 提供的 StopWatch 类的功能强大。
+但它没有 `org.perf4j` 提供的 StopWatch 类的功能强大。
 
 * 在 logback 日志文件中定义 Perf4j 的 Appender（推荐 Perf4j 的日志单独输出到一个文件），如：
 
@@ -178,7 +185,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 * 以此类推......<br>
 
 我们可以看到：接口的总耗时只有 25 ms，主要耗时在读 cb 缓存（23ms），其中读 cb 为 19 ms ，将 json 解析为对象 3 ms 。
-
+<br>
 
 
 ### 准备压测
@@ -187,8 +194,8 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 后续我们将对它进行 N 轮压测：压测 -> 优化 -> 再压测 -> 再优化......
 直到达到一个让人接受的 QPS 指标为止。
 <br>
-*（注意： 如果是服务启动过，要先压测一轮以进行预热，并且这次的数据不作准）*
-
+`注意： 如果是服务启动过，要先压测一轮以进行预热，并且这次的数据不作准`
+<br>
 
 ### 第 0 轮：无压力测试
 
@@ -198,8 +205,9 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 
 ![ptest-0](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-0.png "ptest-0")
 
-可以看出来，没有压力时，整个接口的总时长就 3 ms，基本上就不耗性能。
-也就是说，程序没有哪段代码有明显的性能损耗，只有压力上上去了才有。
+可以看出来，没有压力时，整个接口的总时长就 3 ms，也就是说，程序没有哪段代码有明显的性能损耗，只有压力上上去了才有。
+<br>
+
 
 ###　第 1 轮： 诊断是否是日志造成的性能损耗
 
@@ -248,7 +256,7 @@ public ColumnDetailV2 queryColumnDetailV2FromCache(Long qipuId) {
 日志配置用的是 `RollingFileAppender`，是一种很常见的日志配置方法（细心的读者们发现什么端倪了么？）
 <br>
 
-在以上日志配置下，笔者起 300 并发进行压测：
+在以上日志配置下，笔者准备 600 个连接，起 300 并发线程，压测 60 秒：
 ```
 ./wrk -t300 -c600 -d60s http://10.41.135.74:8982/api/v3/dynamic/product/column/detail?productId=204918601
 ```
@@ -262,9 +270,10 @@ QPS 只有 1400 左右。
 
 然后我们将所有日志级别都调成 ERROR 级别，再压测：
 
-![ptest-log-1-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-log-1-1.png "无日志下的压测结果")
+![ptest-log-1-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-log-1-2.png "无日志下的压测结果")
 
 发现 QPS 从 1400 提升到 2400，因此确认了日志输出对程序性能有较大损耗。
+<br>
 
 
 ### 第 2 轮：优化日志配置
@@ -322,13 +331,13 @@ QPS 只有 1400 左右。
 ![ptest-log-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-log-2.png "优化日志后的压测结果")
 
 优化日志配置后，QPS提升 到 2300 ，虽不如完全关闭日志后的 2400 ，但也相差不多了。
+<br>
 
 
 ### 第 3 轮： 分析系统性能瓶颈
 
-QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最佳状态`，
-这一轮我们尝试分析下压测状态下的机器性能，如 CPU 内存 网络IO 等指标，看能不能找出性能瓶颈。
-<br>
+QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最佳状态`，但下一步应该怎么优化呢？<br>
+我们不妨先尝试分析下压测状态下的机器性能，如 CPU 内存 网络IO 等指标，看能不能找出性能瓶颈和优化思路。<br>
 
 我们先查看 java 进程的性能：<br>
 * 用 `java -ef | grep java` 查看 java 程序的`进程id`(这步开发者应该都会吧，这里就省略截图了)；<br>
@@ -356,11 +365,13 @@ QPS 到 2300 就是极限了么？ 笔者觉得应该还远没到程序的`最�
 ```
 
 具体来说，有两个问题：<br>
-* 一、 logback 用 ArrayBlockingQueue 缓存日志对象，似乎在 take 端 和 poll 端存在资源竞争（ArrayBlockingQueue 存取元素用的是一把锁）。<br>
+* 一、 logback 用 ArrayBlockingQueue 缓存日志对象，似乎在 take 端 和 poll 端存在资源竞争（ArrayBlockingQueue 元素的存和取用的是同一把锁）。<br>
 * 二、 仍有获取 caller 数据的情况（还记得第 2 轮的优化项 3 么？）<br>
 
 对第 1 个问题，网上查了下，logback 的低版本在创建 ArrayBlockingQueue 时，用的是公平锁，的确会有性能问题
-（它在高版本解决了，用非公平锁），在我们项目中升级 logback jar 的改动较大，笔者简单起见直接 hack 改它的源码，将类 AsyncAppenderBase 的源码单独拷贝出来：
+（它在高版本作了优化，将这个地方改成使用非公平锁），由于在我们项目中升级 logback jar 的版本会牵扯比较大，
+笔者简单起见直接 hack 改它的源码，将类 AsyncAppenderBase 的源码单独拷贝出来：
+
 ![ptest-cpu-5](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-5.png "修改AsyncAppenderBase源码")
 
 然后进行修改：
@@ -422,6 +433,7 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 ![ptest-cpu-6](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cpu-6.png "优化日志后的压测结果")
 
 发现 QPS 提升到 2500，虽然不是很明显，但也算前进了一步。
+<br>
 
 
 ### 第 4 轮： 优化 JVM 参数
@@ -448,23 +460,27 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 ......
 ```
 
-* 排名第 1 位的线程，占 CPU 24% ，经排查它仍是日志线程；<br>
-* 排名第 2 ~ 5 位的线程，每个占 CPU 12%（4个加起来就是 48%），经排查它们都是 GC 线程（用于 YGC）：
+* 一、排名第 1 位的线程，占 CPU 24% ，经排查它仍是日志线程；<br>
+* 二、排名第 2 ~ 5 位的线程，每个占 CPU 12%（4个加起来就是 48%），经排查它们都是 GC 线程（用于 YGC）：
 
 ![ptest-jvm-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "YGC线程信息")
 
-* 排名第 6 位及以后线程，平均每个占比 7~8%，经排查大多都是 Web 容器的线程，阻塞在等待 CB 调用的返回上：
+* 三、排名第 6 位及以后线程，平均每个占比 7~8%，经排查大多都是 Web 容器的线程，阻塞在等待 CB 调用的返回上：
 
 ![ptest-jvm-2](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-1.png "Web容器线程信息")
 
 
-虽然这三个都可能是问题，但我们每次都聚焦在一个问题是解决，我们选择先解决第 2 个问题，即 GC 线程的问题。<br>
+虽然这三个可能都是问题，但我们最好先聚焦于解决最大的一个问题，把最大问题解决了再解决下一个问题，这样投入产出比最高（类似于“贪心算法”，哈哈）。<br>
+那问题来了，我们怎么判断哪个问题是最大问题呢？
+由于当前的主要症状是 CPU 被打满，第二个问题吃的 CPU 最多（且按以往经验 GC 线程没有道理吃这么多 CPU），
+所以我们选择先解决第二个问题，即 GC 线程的问题。<br>
 
 我们用 `jstat -gcutil [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令来查一下 GC 的情况：
 
 ![ptest-jvm-3](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-3.png "GC信息")
 
 每列解释如下：<br>
+
 * S0：幸存1区当前使用比例<br>
 * S1：幸存2区当前使用比例<br>
 * E：伊甸园区使用比例<br>
@@ -476,13 +492,15 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 * FGCT：老年代垃圾回收消耗时间<br>
 * GCT：垃圾回收消耗总时间<br>
 
-上图的红框部分，是压测开始时的 GC 信息，从图上 S0 区、S1 区在压测开始后就不停的捣腾，并且 YGC 这列数字增加得很快，说明 YGC 比较严重。<br>
-那 YGC 具体有多严重，以及 YGC 的具体情况是怎样的，
-我们用 `jstat -gcnewcapacity [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令输出 JVM 新生代的具体信息
+上图的红框部分，是压测开始时的 GC 信息，从图上 S0 区、S1 区在压测开始后就不停的捣腾，
+并且 YGC （代表年轻代垃圾回收的累积次数）这列数字增加得很快，说明 YGC 比较严重。<br>
+那 YGC 到底有多严重，以及 YGC 的具体情况是怎样的，
+我们用 `jstat -gcnewcapacity [进程id] [打印的间隔时间（毫秒）] [打印的次数]` 命令输出 JVM 新生代的具体信息：
 
 ![ptest-jvm-4](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-4.png "YGC信息")
 
 每列解释如下：<br>
+
 * NGCMN：新生代最小容量<br>
 * NGCMX：新生代最大容量<br>
 * NGC：当前新生代容量<br>
@@ -494,12 +512,13 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 * EC：当前伊甸园区大小<br>
 * YGC：年轻代垃圾回收次数<br>
 * FGC：老年代回收次数<br>
-上图的红框部分，是压测开始时的 YGC 总次数，我们发现竞然每 1 秒要执行 6 次 YGC。
-另外，NGCMX（新生代最大容量）只有 340 M，S0CMX（最大幸存 0 区大小）、S1CMX（最大幸存 1 区大小）都只有 34 M，的确是有点小。<br>
+
+上图的红框部分，是压测开始时的 YGC 总次数，我们发现 YGC 居然每 1 秒要执行 6 次。
+最重要的是，NGCMX（新生代最大容量）只有 340 M，S0CMX（最大幸存 0 区大小）、S1CMX（最大幸存 1 区大小）都只有 34 M，有点太小了。<br>
 
 
 因此我们在 JVM 启动命令中设置 JVM 参数， 添加 -Xmn1536m 及 -XX:SurvivorRatio=6 两个参数：<br>
-* -Xmn1536m 是指新生代最大容易为 1.5G（总堆内存为 4 G）；<br>
+* -Xmn1536m 是指新生代最大容量为 1.5G（总堆内存为 4 G）；<br>
 * -XX:SurvivorRatio=6 是指 S0(幸存0区) : S1(幸存1区) : EC(伊甸园区) 的比例为 2:2:6。<br>
 
 设置好 JVM 参数后，我们再压测：
@@ -507,18 +526,20 @@ public class AsyncAppenderBase<E> extends UnsynchronizedAppenderBase<E> implemen
 ![ptest-jvm-5](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-5.png "优化JVM后的压测结果")
 
 发现 QPS 提升到 2680（接近 2700）。
-同时GC 线程的 CPU 占用率降下来了，而YGC 的次数，也由 1 秒 6 次，变成了 2 秒 1 次。
+同时查看 GC 情况（如下图），发现 GC 线程的 CPU 占用率降下来了；而YGC 的次数，也由 1 秒 6 次，变成了 2 秒 1 次。
 
 ![ptest-jvm-6](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-jvm-6.png "优化JVM后的YGC信息")
 
+<br>
 
 ### 第 5 轮： 将 Web 容器从 Tomcat 改为 Undertow
 
-经过上一轮优化后，发现不再有明显 CPU 高的线程(最高还是日志线程 14%)，
-但 Web 容器中的 Worker 线程平均为 7%，因此可以考虑下对 Web 容器进行优化。<br>
+经过上一轮优化后，发现 GC 线程的 CPU 占用率降下来了。然后我们再看最大问题是哪个。<br>
+目前不再有明显 CPU 高的线程，最高还是日志线程 14%，其次是 Web 容器中的 Worker 线程，平均为 7%。
+但日志线程只有一个，而 Web 容器中的 Worker 线程则非常多了，因此对 Web 容器的优化是我们下一步的主要方向。<br>
 
-在网上查资料，有的文章分析说 Undertow 的性能比 Tomcat 好，
-因此我们将 SpringBoot 中默认的 Tomcat 改为 Undertow 试试看。<br>
+在网上查资料，有的文章分析说 Undertow 的性能比 Tomcat 好（是SpringBoot 三大内嵌容器 Tomcat、Jetty、Undertow 中最好的一个），
+因此我们尝试将 SpringBoot 中默认的 Tomcat 改为 Undertow 试试看。<br>
 
 首先，在 pom.xml 配置如下：
 
@@ -566,14 +587,18 @@ server:
 ![ptest-undertow-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-undertow-1.png "优化Web容器后的压测结果")
 
 发现 QPS 提升到 3800，果然 Undertow 的性能比 Tomcat 好不少。
-
+<br>
 
 ### 第 6 轮： 添加加上内存缓存
 
-之前发现 Web 容器的 Worker 线程大多阻塞在调用 cb 上，考虑到当前场景下 cb 中的数据是静态（每 5 分钟变化一次），
-可以进行内存缓存，也就是如果从 cb 中读到了数据，就放在内存缓存中（当然要将内存缓存设置一个比较短的过期时间）。<br>
+之前发现 Web 容器的 Worker 线程大多阻塞在调用 cb 上，考虑到当前场景下 cb 中的数据是静态（每 5 分钟更新一次），是可以进行内存缓存的。
+具体方案为：如果内存缓存有数据，就直接读内存缓存中的数据，否则就从 cb 中读数据，并放在内存缓存中。<br>
 
-经过比较，我们选择了 Guava 作为内存缓存的实现方案，代码如下：
+但是要注意两点： 
+* 一、将内存缓存设置一个比较短的过期时间。<br>
+* 二、将内存缓存的大小控制在可接受的范围。<br>
+
+业界有不少成熟的内存缓存开源项目，经过比较，我们选择了 Guava 作为内存缓存的实现方案，代码如下：
 
 ```java
 @Configuration
@@ -627,22 +652,24 @@ server:
 ```
 
 io 线程数改为 4 （因为被测机器的 CPU 只有 4 核）， worker 线程数改为 32 （即 io 线程数的 8 倍）。
-注意：并不是线程数越多越小，因为太多线程数，资源竞争加剧反而对性能有损耗。
+注意：并不是线程数越多越好，因为太多线程数，竞争资源反而会加剧性能损耗。
 
 
 将修改的代码部署到压测环境，再压测：
 
 ![ptest-cache-1](https://raw.githubusercontent.com/terran4j/tech-share/master/qps-improve/ptest-cache-1.png "添加内存缓存后的压测结果")
 
-QPS 进一步提升到 5000，说明在“恰当”的场景下，在分布式缓存的基础上加上内存缓存，能更进一步提升性能。
-
+QPS 进一步提升到 5000，说明在“恰当”的场景下，在分布式缓存的基础上再加上内存缓存，能更进一步提升性能。
+<br>
 
 ### 总结与展望
 
 由于 5000 的 QPS 对当前业务场景已经足够用了，因此笔者也不打算花时间继续优化了。<br>
 最后总结下做性能优化的一些思路和原则：<br>
-* 数据驱动：通过“压测 + 观察数据”的方式，来分析程序的性能瓶颈，而不要想当然（即使是猜想，也要先想办法验证你的猜想再动手优化）；<br>
+
+* 数据驱动：通过“压测 + 分析数据”的方式，来指导我们优化的方向以及明确要解决的问题，而不要想当然（即使是猜，也要先想办法验证你的猜想再动手优化）；<br>
 * 聚焦最大瓶颈：如果有多个优化方向，则先评估哪一个方向的问题是最大瓶颈，然后集中精力去优化这个最大瓶颈，优化完后再评估下一个最大瓶颈并解决，如此迭代前进；<br>
-* 利用工具： 现在业界性能优化的工具还是比较多的，用好这些工具可以事半功倍，有些特殊场景即使没有好用的工具，也可以花点精力制造些小工具来使用。<br>
+* 利用工具： 现在业界性能优化的工具还是比较多的，用好这些工具可以事半功倍，有些特殊场景即使没有好用的工具，也可以花点精力开发一些小工具来使用。<br>
 
 那实际上还有没有优化空间呢？笔者判断应该还是有不少优化空间的，感兴趣读可以继续尝试更多的方案哦！
+<br>
